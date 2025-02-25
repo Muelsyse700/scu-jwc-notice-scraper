@@ -102,6 +102,18 @@ class SCUscraper(object):
         """get_info私有方法: 大批量查询模式"""
         self._fetch_homepage()
 
+        """解析tzgg页"""
+        response = requests.get(self._next_page_url)
+        html_content = response.content  # NOTE:不要用.text，中文会乱码
+        soup = BeautifulSoup(html_content, "html.parser")
+
+        notice_board = soup.find("div", class_="tz-list").find_all("li")
+        info_list = list()
+        # print(notice_board)
+        for notice in notice_board:
+            print(notice)
+            print(Fore.YELLOW + "-" * 50)
+
     @staticmethod
     def _remove_repetitions(info_list):
         """静态方法:消除info_list中的重复消息字典"""
@@ -223,7 +235,7 @@ class SCUscraper(object):
 
 
 def main():
-    scraper = SCUscraper("https://jwc.scu.edu.cn/", mode="realtime")
+    scraper = SCUscraper("https://jwc.scu.edu.cn/", mode="quantity")
     # scraper.filter_info(
     #     title_contains="四川大学",
     #     time_after="2024-10-10",
@@ -231,7 +243,7 @@ def main():
     #     top=None,
     #     print_filter=True,
     # )
-    scraper.show_info()
+    # scraper.show_info()
 
 
 if __name__ == "__main__":
