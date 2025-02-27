@@ -1,11 +1,11 @@
 from colorama import init, Fore, Back  # 终端字体染色
 from bs4 import BeautifulSoup
 from datetime import datetime
-from typing import Iterable, Union, Literal
+from typing import Iterable, Union
+from urllib.parse import urljoin
+import time
 import csv
 import requests
-
-# import inspect  # 判断是否传参
 
 
 class SCUscraper(object):
@@ -21,21 +21,24 @@ class SCUscraper(object):
         "_mode",  # 信息采集模式:"realtime" / "quantity"
         "_site",  # 教务处主页地址
         "_next_page_url",  # 下一页地址信息
+        "_runtime",  # 运行时间
         "info",  # 全部已获取信息
     )
 
-    def __init__(self, site: str, mode: Literal["realtime", "quantity"]):
-        self._site = site
-        self._mode = mode
-        self.get_info()
+    def __init__(self, params_dict):
+        self._site = params_dict["site"]
+        self._mode = params_dict["mode"]
+        self.get_info(params_dict)
 
     def get_info(self, params_dict: dict = None):  # TODO:功能拆分为多个私有方法
         """抓取教务处通知公告栏"""
-
+        start_time = time.time()
         if self._mode == "realtime":
             self._realtime_mode(params_dict)
         elif self._mode == "quantity":
             self._quantity_mode(params_dict)
+        end_time = time.time()
+        self._runtime = end_time - start_time
 
     def _fetch_homepage(self):
         """爬取教务处主页"""
@@ -46,13 +49,12 @@ class SCUscraper(object):
         html_content = response.content  # NOTE:不要用.text，中文会乱码
         soup = BeautifulSoup(html_content, "html.parser")
 
-        """解析主页通知栏的<li>标签下的通知信息并以元组列表形式存储"""
+        """解析主页通知栏的<li>标签下的通知信息并以字典形式存储在列表中"""
         notice_board = soup.find("div", class_="sect2-l").find_all("li")
         info_list = list()
         for notice in notice_board:
-            notice_url = self._site + str(
-                notice.find_all("a")[0].get("href")
-            )  # NOTE:文章链接
+            notice_url = urljoin(self._site, notice.find_all("a")[0].get("href"))
+            # NOTE:文章链接
             # 寻找<a>标签中的href属性，即url
             notice_title = str(notice.find_all("p")[0].get_text())  # NOTE:文章标题
             # 寻找<p>标签并获取标签里的文本，即标题
@@ -99,52 +101,83 @@ class SCUscraper(object):
         self._fetch_homepage()
 
     def _quantity_mode(self, params_dict: dict = None) -> None:
-        """get_info私有方法: 大批量查询模式"""
-        self._fetch_homepage()
-
-        """解析tzgg页"""
-        response = requests.get(self._next_page_url)
-        html_content = response.content  # NOTE:不要用.text，中文会乱码
-        soup = BeautifulSoup(html_content, "html.parser")
+        """get_info私有方法: 批量查询模式"""
+        if params_dict["notice_num"] != 0:
+            self._fetch_homepage()  # 获取首页置顶消息和 _next_page_url
+        else:
+            self.info = list()
 
         """抓取通知列表"""
-        # TODO:有待增加循环爬取下一页的步骤
-        index = 0
-        notice_num = 0
-        notice_board = soup.find("div", class_="tz-list").find_all("li")
+        notice_num = 0  # 已获取通知条数
+        index = 0  # 当前页码
         info_list = list()
-        # print(notice_board)
-        index += 1
-        for notice in notice_board:
-            notice_num += 1
-            notice_url = self._site + str(notice.find_all("a")[0].get("href"))
-            # 寻找<a>标签中的href属性，即url
-            notice_title = str(notice.find_all("p")[1].get_text())
-            # 寻找<p>标签并获取标签里的文本，即标题
-            notice_time = datetime.strptime(
-                notice.find_all("span")[0].get_text()
-                + "/"
-                + notice.find_all("p")[0].get_text().strip(),  # NOTE:末尾有个空格得删掉
-                "%Y/%m/%d",
+
+        while params_dict["notice_num"] - notice_num:
+            index += 1
+
+            """解析网页"""
+            response = requests.get(self._next_page_url)
+            html_content = response.content  # NOTE:不要用.text，中文会乱码
+            soup = BeautifulSoup(html_content, "html.parser")
+            notice_board = soup.find("div", class_="tz-list").find_all("li")
+
+            """获取并处理通往下一页的url"""
+            relative_url = (
+                soup.find("span", class_="p_next p_fun").find("a").get("href")
             )
-            info_list.append(
-                {
-                    "ID": hash(notice_url),  # 消息的哈希值作为唯一标识符
-                    "url": notice_url,
-                    "title": notice_title,
-                    "time": notice_time,  # NOTE: time是yyyy-mm-dd的datetime对象
-                    "tag": None,
-                    "is_top": False,
-                }
-            )
-        if index == 1:  # 比对置顶消息
-            for i in range(min(len(info_list), len(self.info))):
-                info_list[i] = self.info[i]
-        self.info = SCUscraper._remove_repetitions(info_list)
-        # =====测试用=====
-        for j in self.info:
-            print(j)
-        print(Fore.YELLOW + "-" * 50)
+            if not "tzgg" in relative_url:
+                relative_url = "tzgg/" + relative_url
+            self._next_page_url = urljoin(self._site, relative_url)
+
+            """遍历当前页消息列表"""
+            for notice in notice_board:
+                notice_num += 1
+
+                notice_url = urljoin(self._site, notice.find_all("a")[0].get("href"))
+                # 寻找<a>标签中的href属性，即url
+                notice_title = str(notice.find_all("p")[1].get_text())
+                """查找含有...标题的具体内容"""
+                try:
+                    if "..." in notice_title:
+                        r_title = requests.get(notice_url)
+                        c_title = r_title.content  # NOTE:不要用.text，中文会乱码
+                        soup_title = BeautifulSoup(c_title, "html.parser")
+                        notice_title = (
+                            soup_title.find("div", class_="detail-tit wow fadeInUp")
+                            .find("h2")
+                            .get_text()
+                        )
+                except AttributeError:
+                    pass
+                # 寻找<p>标签并获取标签里的文本，即标题
+                notice_time = datetime.strptime(
+                    notice.find_all("span")[0].get_text()
+                    + "/"
+                    + notice.find_all("p")[0]
+                    .get_text()
+                    .strip(),  # NOTE:末尾有个空格得删掉
+                    "%Y/%m/%d",
+                )
+                info_list.append(
+                    {
+                        "ID": hash(notice_url),  # 消息的哈希值作为唯一标识符
+                        "url": notice_url,
+                        "title": notice_title,
+                        "time": notice_time,  # NOTE: time是yyyy-mm-dd的datetime对象
+                        "tag": None,
+                        "is_top": False,
+                    }
+                )
+                # 比对置顶消息
+                if index == 1:
+                    for i in range(min(len(info_list), len(self.info))):
+                        info_list[i] = self.info[i]
+                # 满足消息条数后跳出for
+                if notice_num == params_dict["notice_num"]:
+                    break
+                # for end
+            self.info = SCUscraper._remove_repetitions(info_list)
+            # while end
 
     @staticmethod
     def _remove_repetitions(info_list) -> list:
@@ -169,8 +202,10 @@ class SCUscraper(object):
         print_filter=False,  # 是否同时打印过滤器信息
     ):
         """信息过滤器"""
+
         if self._mode == "quantity" and not tag_is is None:
-            raise ValueError("批量搜索模式不能过滤tag")
+            print("批量搜索模式不能过滤tag")
+            tag_is = None
 
         # tag_is 预处理转tags集合
         if isinstance(tag_is, str):
@@ -251,7 +286,7 @@ class SCUscraper(object):
 
     def show_info(self):
         """格式化输出采集到的信息内容"""
-        print(Fore.WHITE + "{:=^120}".format(" " + self._mode + " mode "))
+        print(Fore.WHITE + "{:=^130}".format(" " + self._mode + f" mode "))
         for notice in self.info:
             print(Fore.CYAN + notice["url"], end=" ")
             print(Fore.RED + notice["time"].strftime("%y-%m-%d"), end=" ")
@@ -263,6 +298,12 @@ class SCUscraper(object):
             else:
                 print()
             # print(str(notice["ID"]))
+        print(
+            Fore.WHITE
+            + "{:=^130}".format(
+                f" 任务完成  总计用时 {self._runtime:.2f} s  采集到共 {len(self.info)} 条 "
+            )
+        )
 
     @property
     def mode(self) -> str:
@@ -271,10 +312,15 @@ class SCUscraper(object):
 
 
 def main():
-    scraper = SCUscraper("https://jwc.scu.edu.cn/", mode="quantity")
+    params_dict = {
+        "site": "https://jwc.scu.edu.cn/",  # 教务处网址
+        "mode": "quantity",  # 爬取模式
+        "notice_num": 100,  # 爬取条数，非批量爬取模式不用填写
+    }
+    scraper = SCUscraper(params_dict)
     scraper.filter_info(
         title_contains="四川大学",
-        time_after="2024-10-10",
+        time_after="2024-09-10",
         tag_is=None,
         top=None,
         print_filter=True,
